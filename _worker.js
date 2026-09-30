@@ -2278,9 +2278,11 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 			return r.type === 28 && typeof data === 'string' && isIPHostname(data) ? [data] : [];
 		}))];
 		const 拨号上限 = Math.max(1, TCP并发拨号数 | 0);
-		const ipList = ipv4List.length >= 拨号上限
-			? ipv4List.slice(0, 拨号上限)
-			: ipv4List.concat(ipv6List.slice(0, 拨号上限 - ipv4List.length));
+		//禁用IPV6
+		//const ipList = ipv4List.length >= 拨号上限
+		//	? ipv4List.slice(0, 拨号上限)
+		//	: ipv4List.concat(ipv6List.slice(0, 拨号上限 - ipv4List.length));
+		const ipList = ipv4List.slice(0, 拨号上限);
 		const 使用记录类型 = ipv4List.length > 0
 			? (ipList.length > ipv4List.length ? 'A+AAAA' : 'A')
 			: 'AAAA';
