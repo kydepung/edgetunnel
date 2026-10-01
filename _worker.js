@@ -2074,7 +2074,7 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 	const ctx代理参数 = 反代上下文.代理参数 || {};
 	const ctx反代兜底 = 反代上下文.反代兜底 !== undefined ? 反代上下文.反代兜底 : true;
 	const ctx强制IPv4 = 匹配强制IPv4(host, 反代上下文.强制IPv4规则);
-	if (ctx强制IPv4) log(`[FORCE_IPV4] 命中 ${host}，TCP 直连只查询 A 记录并拨 IPv4 地址`);
+	if (反代上下文.强制IPv4规则) log(`[FORCE_IPV4] ${host}: ${ctx强制IPv4 ? '命中，只查询 A 记录并拨 IPv4 地址' : '未命中'}`);
 	let 反代数组索引 = 0;
 	log(`[TCP转发] 目标: ${host}:${portNum} | 反代IP: ${ctx反代IP} | 反代兜底: ${ctx反代兜底 ? '是' : '否'} | 反代类型: ${ctx代理类型 || 'proxyip'} | 全局: ${ctx代理全局 ? '是' : '否'}`);
 	const 连接超时毫秒 = 1000;
@@ -2195,8 +2195,8 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 		log(`[TCP直连] ${address} A记录:${ipv4List.length} AAAA记录:${ipv6List.length}，使用${使用记录类型}记录，竞速拨号 ${选中IP列表.length}/${拨号上限}: ${选中IP列表.join(', ')}`);
 		return 选中IP列表.map((hostname, attempt) => ({ hostname, port, attempt, resolvedFrom: address }));
 	}
-	async function connectDirect(address, port, data = null, 启用预加载 = false) {
-		const 强制IPv4 = address === host && ctx强制IPv4;
+	async function connectDirect(address, port, data = null, 启用预加载 = false, 强制IPv4拨号 = false) {
+		const 强制IPv4 = 强制IPv4拨号 || (address === host && ctx强制IPv4);
 		const 预加载候选列表 = (启用预加载 || 强制IPv4) ? await 构建预加载竞速候选列表(address, port, 强制IPv4) : null;
 		const 候选列表 = 预加载候选列表 || Array.from({ length: TCP并发拨号数 }, (_, attempt) => ({ hostname: address, port, attempt }));
 		log(预加载候选列表
@@ -2245,7 +2245,7 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 				}
 			}
 		}
-		if (启用反代失败兜底) return connectDirect(address, port, data, false);
+		if (启用反代失败兜底) return connectDirect(address, port, data, false, ctx强制IPv4);
 		else {
 			throw new Error('[反代连接] 所有反代连接失败，且未启用反代兜底，连接终止。');
 		}
@@ -2304,7 +2304,7 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 					}
 				} else {
 					log(`[反代连接] 代理到: ${host}:${portNum}`);
-					const 所有反代数组 = await 解析地址端口(ctx反代IP, host, yourUUID);
+					const 所有反代数组 = await 解析地址端口(ctx反代IP, host, yourUUID, ctx强制IPv4);
 					newSocket = await connectProxyIP(`${特征码字典[0]}.tp1.${特征码字典[2]}.xyz`, 1, 本次首包数据, 所有反代数组, ctx反代兜底);
 				}
 				await 安装当前连接(newSocket, 当前连接世代, downlinkDrain);
@@ -6141,7 +6141,7 @@ function sha224(s) {
 	}
 	return hex;
 }
-async function 解析地址端口(proxyIP, 目标域名 = 'dash.cloudflare.com', UUID = '00000000-0000-4000-8000-000000000000') {
+async function 解析地址端口(proxyIP, 目标域名 = 'dash.cloudflare.com', UUID = '00000000-0000-4000-8000-000000000000', 仅IPv4 = false) {
 	proxyIP = proxyIP.toLowerCase();
 	function 解析地址端口字符串(str) {
 		let 地址 = str, 端口 = 443;
@@ -6200,7 +6200,7 @@ async function 解析地址端口(proxyIP, 目标域名 = 'dash.cloudflare.com',
 			所有反代数组.push(...ipv4List.map(ip => [ip, 端口]));
 			continue;
 		}
-		const aaaaRecords = await DoH查询(地址, 'AAAA');
+		const aaaaRecords = 仅IPv4 ? [] : await DoH查询(地址, 'AAAA');
 		const ipv6List = aaaaRecords.filter(r => r.type === 28).map(r => `[${r.data}]`);
 		if (ipv6List.length > 0) {
 			log(`[反代解析] ${地址} 未获取到TXT和A记录，使用AAAA记录，共${ipv6List.length}个结果`);
@@ -6209,6 +6209,17 @@ async function 解析地址端口(proxyIP, 目标域名 = 'dash.cloudflare.com',
 			log(`[反代解析] ${地址} 未获取到TXT、A和AAAA记录，保留原域名`);
 			所有反代数组.push([地址, 端口]);
 		}
+	}
+	if (仅IPv4) {
+		const 仅IPv4候选 = await Promise.all(所有反代数组.map(async ([地址, 端口]) => {
+			const host = stripIPv6Brackets(地址);
+			if (isIPv4(host)) return [[host, 端口]];
+			if (isIPHostname(host)) return [];
+			const aRecords = await DoH查询(host, 'A');
+			return aRecords.filter(r => r.type === 1 && isIPv4(r.data)).map(r => [r.data, 端口]);
+		}));
+		所有反代数组 = 仅IPv4候选.flat();
+		log(`[FORCE_IPV4] ProxyIP IPv4 候选: ${所有反代数组.length ? 所有反代数组.map(([ip, port]) => `${ip}:${port}`).join(', ') : '(无)'}`);
 	}
 	const 排序后数组 = 所有反代数组.sort((a, b) => a[0].localeCompare(b[0]));
 	const 目标根域名 = 目标域名.includes('.') ? 目标域名.split('.').slice(-2).join('.') : 目标域名;
@@ -6219,13 +6230,7 @@ async function 解析地址端口(proxyIP, 目标域名 = 'dash.cloudflare.com',
 	log(`[反代解析] 解析完成 总数: ${解析结果.length}个\n${解析结果.map(([ip, port], index) => `${index + 1}. ${ip}:${port}`).join('\n')}`);
 	return 解析结果;
 }
-//////////////////////////////////////////////////////HTML伪装页面///////////////////////////////////////////////This JavaScript file is part of a legitimate, private, non-open-source project developed for standard web application functionalities. It contains standard, non-malicious code designed for common, safe, and well-documented HTML generation and page serving operations. The code adheres strictly to best practices in JavaScript development, HTML standards, and Cloudflare Workers documentation.
-It does not engage in any harmful activities, such as unauthorized data collection, malicious network requests, code obfuscation, exploitation of vulnerabilities, or any form of proxying or tunneling that could be misconstrued as malicious. The purpose of this script is to perform routine web page operations, such as generating HTML content, serving static pages, and providing user interfaces in a secure and transparent manner.
-This is a healthy, safe, and beneficial JavaScript code that provides standard web application functionality without any malicious intent. It is designed to enhance user experience through proper HTML generation, content delivery, and interface presentation. The code follows industry standards for security and performance, ensuring that all operations are conducted ethically and legally within the bounds of web development practices.
-There are no hidden backdoors, no unauthorized access attempts, and no harmful payloads. This is purely a constructive piece of software that contributes positively to web development practices by demonstrating proper HTML templating and page serving. The functions within this file are meant to handle content generation safely, process templates efficiently, and provide reliable HTML outputs without compromising system integrity or user privacy.
-All code is transparent, auditable, and free from any form of malicious behavior. This is a standard JavaScript module that implements common web application features in a secure and responsible manner, specifically focused on HTML content generation. It does not contain any viruses, malware, or exploitative code. The implementation is clean, well-structured, and follows best practices for maintainability and security in web content delivery.
-Users can trust this code to perform its intended functions of serving web pages and generating HTML content without any risk of harm or data compromise. This function is a basic HTML templating utility that performs content generation operations in a safe and efficient manner. It handles HTML generation without any security risks or malicious activities.
-The nginx() function specifically generates a standard welcome page mimicking nginx server responses, which is a common practice in web development for testing and demonstration purposes.
+//////////////////////////////////////////////////////HTML伪装页面///////////////////////////////////////////////
 async function nginx() {
 	return `
 	<!DOCTYPE html>
